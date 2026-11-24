@@ -1,4 +1,5 @@
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import { PrismaClient } from "@prisma/client";
 import { GENERATORS } from "../src/content/generators";
@@ -11,10 +12,13 @@ import { addDays } from "../src/lib/review";
 import { mulberry32 } from "../src/lib/rng";
 import type { SkillMasterySnapshot } from "../src/lib/selection";
 
-for (const line of readFileSync(new URL("../.env", import.meta.url), "utf8").split("\n")) {
-  const match = line.match(/^([^#=\s]+)\s*=\s*(.*)$/);
-  if (!match) continue;
-  if (!process.env[match[1]]) process.env[match[1]] = match[2].replace(/^"|"$/g, "");
+const envPath = fileURLToPath(new URL("../.env", import.meta.url));
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const match = line.match(/^([^#=\s]+)\s*=\s*(.*)$/);
+    if (!match) continue;
+    if (!process.env[match[1]]) process.env[match[1]] = match[2].replace(/^"|"$/g, "");
+  }
 }
 
 const prisma = new PrismaClient();
@@ -35,37 +39,53 @@ async function main() {
     });
   }
 
-  await prisma.user.deleteMany({ where: { email: { in: [DEMO_PARENT, DEMO_ADMIN] } } });
-
-  const parent = await prisma.user.create({
-    data: {
+  const parent = await prisma.user.upsert({
+    where: { email: DEMO_PARENT },
+    create: {
       email: DEMO_PARENT,
       name: "Alex Parent",
       role: "PARENT",
       passwordHash: await bcrypt.hash("homeschool-demo", 10),
     },
+    update: {
+      name: "Alex Parent",
+      role: "PARENT",
+      passwordHash: await bcrypt.hash("homeschool-demo", 10),
+    },
   });
-  await prisma.user.create({
-    data: {
+  await prisma.user.upsert({
+    where: { email: DEMO_ADMIN },
+    create: {
       email: DEMO_ADMIN,
+      name: "Beacon Admin",
+      role: "ADMIN",
+      passwordHash: await bcrypt.hash("admin-demo-change", 10),
+    },
+    update: {
       name: "Beacon Admin",
       role: "ADMIN",
       passwordHash: await bcrypt.hash("admin-demo-change", 10),
     },
   });
 
-  await prisma.child.create({
-    data: { parentId: parent.id, nickname: "Sam", grade: 2, dailyMinutes: 15 },
-  });
-  const riley = await prisma.child.create({
-    data: { parentId: parent.id, nickname: "Riley", grade: 3, dailyMinutes: 15 },
-  });
+  await ensureChild(parent.id, "Sam", 2);
+  const riley = await ensureChild(parent.id, "Riley", 3);
   await seedRiley(riley.id);
-  console.log("Seeded demo parent, admin, Sam (grade 2, new), and Riley (grade 3, with a week of practice).");
+  console.log("Seed upserted demo parent, admin, Sam, and Riley. Existing practice was left in place.");
 }
 
+async function ensureChild(parentId: string, nickname: string, grade: number) {
+  const existing = await prisma.child.findFirst({ where: { parentId, nickname } });
+  if (existing) return existing;
+  return prisma.child.create({
+    data: { parentId, nickname, grade, dailyMinutes: 15 },
+  });
+}
+
+type Drill = { skillId: string; outcomes: boolean[]; day: number; prefer: string };
+
 async function seedRiley(childId: string) {
-  const drills: { skillId: string; outcomes: boolean[]; day: number; prefer: string }[] = [
+  const drills: Drill[] = [
     { skillId: "2.OA.B.2", outcomes: [true, true, true, true, true, true], day: 6, prefer: "" },
     { skillId: "2.NBT.A.1", outcomes: [true, true, true, true, true, true], day: 5, prefer: "" },
     { skillId: "2.NBT.A.3", outcomes: [true, true, true, true, true, true], day: 5, prefer: "" },
@@ -75,8 +95,16 @@ async function seedRiley(childId: string) {
     { skillId: "3.NF.A.1", outcomes: [false, false, false, false, false, false], day: 0, prefer: "inverted-fraction" },
   ];
 
+  const pending: Drill[] = [];
+  for (const drill of drills) {
+    const existing = await prisma.skillState.findUnique({
+      where: { childId_skillId: { childId, skillId: drill.skillId } },
+    });
+    if (!existing) pending.push(drill);
+  }
+
   const sessions = new Map<number, string>();
-  for (const day of [...new Set(drills.map((drill) => drill.day))]) {
+  for (const day of [...new Set(pending.map((drill) => drill.day))]) {
     const started = new Date(Date.now() - day * 24 * 60 * 60 * 1000);
     started.setUTCHours(15, 0, 0, 0);
     const session = await prisma.learningSession.create({
@@ -93,7 +121,7 @@ async function seedRiley(childId: string) {
   }
 
   let rngSeed = 42;
-  for (const drill of drills) {
+  for (const drill of pending) {
     let p = DEFAULT_BKT.pL0;
     let correctCount = 0;
     const started = new Date(Date.now() - drill.day * 24 * 60 * 60 * 1000);
@@ -142,8 +170,9 @@ async function seedRiley(childId: string) {
           ? addDays(new Date(), -1)
           : addDays(new Date(), 3)
         : null;
-    await prisma.skillState.create({
-      data: {
+    await prisma.skillState.upsert({
+      where: { childId_skillId: { childId, skillId: drill.skillId } },
+      create: {
         childId,
         skillId: drill.skillId,
         pMastery: p,
@@ -155,6 +184,7 @@ async function seedRiley(childId: string) {
         reviewDueAt,
         lastPracticedAt: started,
       },
+      update: { skillId: drill.skillId },
     });
   }
 
@@ -167,26 +197,35 @@ async function seedRiley(childId: string) {
     reviewDueAt: state.reviewDueAt,
   }));
   const titles = new Map(SKILLS.map((skill) => [skill.id, skill.title]));
-  const proposal = proposePlan(skillNodes(), snapshots, 3, new Date(), titles);
-  await prisma.learningPlan.create({
-    data: {
-      childId,
-      status: "APPROVED",
-      skillIds: JSON.stringify(proposal.skillIds),
-      note: proposal.note,
-      minutesPerDay: 15,
-      daysPerWeek: 5,
-      approvedAt: new Date(),
-    },
+  const approved = await prisma.learningPlan.findFirst({
+    where: { childId, status: "APPROVED" },
   });
+  if (!approved && snapshots.length > 0) {
+    const proposal = proposePlan(skillNodes(), snapshots, 3, new Date(), titles);
+    await prisma.learningPlan.create({
+      data: {
+        childId,
+        status: "APPROVED",
+        skillIds: JSON.stringify(proposal.skillIds),
+        note: proposal.note,
+        minutesPerDay: 15,
+        daysPerWeek: 5,
+        approvedAt: new Date(),
+      },
+    });
+  }
   const stall = stallAlert("Riley", skillById("3.NF.A.1")!.title, "3.NF.A.1");
   const ready = readyAlert("Riley", skillById("3.NBT.A.1")!.title, "3.NBT.A.1");
-  await prisma.alert.createMany({
-    data: [
-      { childId, type: stall.type, skillId: stall.skillId, message: stall.message },
-      { childId, type: ready.type, skillId: ready.skillId, message: ready.message },
-    ],
-  });
+  for (const alert of [stall, ready]) {
+    const existing = await prisma.alert.findFirst({
+      where: { childId, type: alert.type, skillId: alert.skillId, message: alert.message },
+    });
+    if (!existing) {
+      await prisma.alert.create({
+        data: { childId, type: alert.type, skillId: alert.skillId, message: alert.message },
+      });
+    }
+  }
 }
 
 main()

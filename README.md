@@ -7,20 +7,36 @@ Beacon does not show model-written text to children, does not offer chat, and do
 ## Stack
 
 - Next.js (App Router) and TypeScript
-- Prisma with SQLite for local development (`DATABASE_URL` can later point at Postgres; the schema uses Prisma types that move over, with a provider change)
-- Auth is an httpOnly JWT cookie. Passwords are hashed with bcrypt.
-- Mastery, item selection, the diagnostic, and the weekly note are plain TypeScript. Vitest covers them without the database.
+- Prisma with Postgres. Locally that can be Docker or a Neon dev branch. Vercel Hobby uses the Neon integration.
+- Auth is an httpOnly JWT cookie. Passwords are hashed with bcrypt. In production the cookie is `Secure`, so the browser sends it on HTTPS.
+- Mastery, item selection, the diagnostic, and the weekly note are plain TypeScript. Vitest covers them without a database.
 
 ## How to run
+
+Postgres first. Docker:
+
+```bash
+docker run --name beacon-postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=beacon \
+  -p 5432:5432 -d postgres:16
+```
+
+Or create a Neon dev branch and copy its pooled and direct connection strings.
 
 ```bash
 npm install
 cp .env.example .env
+# Set DATABASE_URL, DATABASE_URL_UNPOOLED, and a JWT_SECRET of at least 32 characters.
 npx prisma db push
 npm run db:seed
 npm test
 npm run dev
 ```
+
+`DATABASE_URL` is the connection the app uses. `DATABASE_URL_UNPOOLED` is the direct connection Prisma uses for `db push`. On a local Postgres server, set them to the same URL.
+
+The seed is safe to run again. It upserts item templates and the two demo accounts, creates Sam and Riley only if those nicknames are missing, and writes Riley's sample week only for skills that do not already have a mastery row. It refreshes the demo account passwords to the values below and does not delete households or practice.
 
 Open [http://localhost:3000](http://localhost:3000).
 
@@ -65,7 +81,7 @@ flowchart LR
   dash --> export[CSV and PDF]
 ```
 
-Skill definitions and parametric item templates live in `src/content`. Attempts, per-child mastery, plans, and alerts live in SQLite.
+Skill definitions and parametric item templates live in `src/content`. Attempts, per-child mastery, plans, and alerts live in Postgres. JSON snapshots (choices, plan skill lists) stay in text columns.
 
 A skill is on the **frontier** when every prerequisite is mastered and the skill itself is not. Practice rotates through the frontier skills on the approved plan. About one item in three is a due review. Review spacing is 1, 3, 7, 16, then 35 days.
 
@@ -95,13 +111,31 @@ npm test
 npm run typecheck
 ```
 
-With the app already running, `node scripts/smoke.mjs` registers a parent, runs a diagnostic, approves a plan, practices, and checks the report, CSV, and PDF.
+Vitest does not open Postgres. The mastery, selection, diagnostic, report, and item tests are pure functions. With the app already running, `node scripts/smoke.mjs` registers a parent, runs a diagnostic, approves a plan, practices, and checks the report, CSV, and PDF.
 
-Tests cover BKT updates and the mastery threshold, frontier and review selection, diagnostic movement and placement, plan checks, stall detection, weekly-note text, item validity (one correct answer, tagged distractors, the math checked independently of the stem), and a smoke check that the PDF export is a PDF.
+## Deploy on Vercel
+
+The Hobby project build command is `npm run vercel-build` (Vercel uses that script automatically when it exists):
+
+```bash
+prisma generate && prisma db push --skip-generate && tsx prisma/seed.ts && next build
+```
+
+Attach the Neon integration, then set these environment variables for Production and Preview:
+
+| Name | Value |
+| --- | --- |
+| `DATABASE_URL` | Neon pooled URL (injected by the integration) |
+| `DATABASE_URL_UNPOOLED` | Neon direct URL (injected by the integration) |
+| `JWT_SECRET` | Random string, at least 32 characters. The server throws on boot if this is missing or shorter. |
+| `NEXT_PUBLIC_APP_URL` | `https://<your-project>.vercel.app` |
+| `NEXT_TELEMETRY_DISABLED` | `1` |
+
+Do not commit `.env`. Preview and production both serve HTTPS, and auth cookies are marked Secure there.
 
 ## What's next
 
-- Replace SQLite with Postgres and add a real migration history before the pilot.
+- Replace `db push` with a reviewed migration history before real family data is in the database.
 - Email verification, password reset, and a session inventory for the parent.
 - Widen the map past this grade 2–4 slice (operations, base ten, fractions, a little measurement).
 - Calibrate item difficulty on real attempts; the Elo update here is only a start.

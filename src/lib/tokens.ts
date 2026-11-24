@@ -18,12 +18,47 @@ export type ChildClaims = {
   grade: number;
 };
 
-function secret() {
-  const value = process.env.JWT_SECRET ?? "";
+/**
+ * Production refuses to boot without a long JWT secret.
+ * Development still requires a secret, with a shorter minimum.
+ */
+export function assertJwtSecret(
+  env: { NODE_ENV?: string; JWT_SECRET?: string } = process.env,
+): string {
+  const value = env.JWT_SECRET ?? "";
+  if (env.NODE_ENV === "production") {
+    if (!value) {
+      throw new Error(
+        "JWT_SECRET is missing. Set JWT_SECRET to a random string of at least 32 characters in the host environment before starting Beacon Math.",
+      );
+    }
+    if (value.length < 32) {
+      throw new Error(
+        `JWT_SECRET is too short (${value.length} characters). Production requires at least 32 characters.`,
+      );
+    }
+    return value;
+  }
   if (value.length < 16) {
     throw new Error("JWT_SECRET must be set to at least 16 characters.");
   }
-  return new TextEncoder().encode(value);
+  return value;
+}
+
+if (process.env.NODE_ENV === "production") {
+  assertJwtSecret();
+}
+
+function secret() {
+  return new TextEncoder().encode(assertJwtSecret());
+}
+
+/** Secure cookies are required on HTTPS. Vercel production and preview both run with NODE_ENV=production. */
+export function cookieSecure(
+  env: { NODE_ENV?: string; NEXT_PUBLIC_APP_URL?: string } = process.env,
+): boolean {
+  if (env.NODE_ENV === "production") return true;
+  return (env.NEXT_PUBLIC_APP_URL ?? "").startsWith("https://");
 }
 
 export async function signParentToken(claims: ParentClaims): Promise<string> {
@@ -89,5 +124,5 @@ export const cookieOptions = {
   httpOnly: true,
   sameSite: "lax" as const,
   path: "/",
-  secure: process.env.NODE_ENV === "production",
+  secure: cookieSecure(),
 };
