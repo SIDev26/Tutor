@@ -1,0 +1,137 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+/// Parent or admin account. Children do not have logins.
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("PARENT")
+  createdAt    DateTime @default(now())
+  children     Child[]
+}
+
+/// Nickname and grade only. No child email or surname.
+model Child {
+  id           String            @id @default(cuid())
+  parentId     String
+  parent       User              @relation(fields: [parentId], references: [id], onDelete: Cascade)
+  nickname     String
+  grade        Int
+  dailyMinutes Int               @default(15)
+  createdAt    DateTime          @default(now())
+  states       SkillState[]
+  attempts     Attempt[]
+  sessions     LearningSession[]
+  plans        LearningPlan[]
+  alerts       Alert[]
+}
+
+model SkillState {
+  id              String    @id @default(cuid())
+  childId         String
+  child           Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  skillId         String
+  pMastery        Float
+  attempts        Int       @default(0)
+  correctCount    Int       @default(0)
+  status          String
+  inferred        Boolean   @default(false)
+  reviewStreak    Int       @default(0)
+  reviewDueAt     DateTime?
+  lastPracticedAt DateTime?
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([childId, skillId])
+  @@index([childId, status])
+}
+
+model LearningSession {
+  id        String    @id @default(cuid())
+  childId   String
+  child     Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  kind      String
+  status    String    @default("ACTIVE")
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  limitSec  Int
+  maxItems  Int?
+  planId    String?
+  attempts  Attempt[]
+
+  @@index([childId, status])
+}
+
+model Attempt {
+  id               String          @id @default(cuid())
+  childId          String
+  child            Child           @relation(fields: [childId], references: [id], onDelete: Cascade)
+  sessionId        String
+  session          LearningSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  skillId          String
+  templateKey      String
+  reason           String
+  stem             String
+  choicesJson      String
+  correctChoiceId  String
+  selectedChoiceId String?
+  correct          Boolean?
+  misconception    String?
+  explanation      String          @default("")
+  difficulty       Float
+  pMasteryBefore   Float?
+  pMasteryAfter    Float?
+  responseMs       Int?
+  createdAt        DateTime        @default(now())
+  answeredAt       DateTime?
+
+  @@index([childId, skillId])
+  @@index([sessionId])
+}
+
+model LearningPlan {
+  id            String    @id @default(cuid())
+  childId       String
+  child         Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  status        String
+  skillIds      String
+  minutesPerDay Int
+  daysPerWeek   Int       @default(5)
+  note          String
+  parentNote    String    @default("")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  approvedAt    DateTime?
+
+  @@index([childId, status])
+}
+
+model Alert {
+  id        String    @id @default(cuid())
+  childId   String
+  child     Child     @relation(fields: [childId], references: [id], onDelete: Cascade)
+  type      String
+  skillId   String?
+  message   String
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  @@index([childId, readAt])
+}
+
+/// Per-template difficulty, adjusted with a light Elo-style update.
+model ItemTemplate {
+  key          String @id
+  skillId      String
+  difficulty   Float
+  attempts     Int    @default(0)
+  correctCount Int    @default(0)
+}
